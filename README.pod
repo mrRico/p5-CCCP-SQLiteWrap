@@ -1,0 +1,292 @@
+=head1 NAME
+
+B<CCCP::SQLiteWrap> - wrapper on SQLite (only for nix)
+
+=head1 SYNOPSIS
+
+    use CCCP::SQLiteWrap;
+    
+    my $db_path = '/abs/path/to/my/sqlite/base.db';
+    
+    my $dbh = CCCP::SQLiteWrap->connect($db_path);
+    $dbh->check();
+    
+    $dbh->create_table(
+        
+        # description table artist 
+        'artist' => {
+            
+            # fields on table artist
+            fields => {
+             'artist_id' => 'INTEGER',
+             'name' => 'TEXT',
+             'photo' => 'BLOB',
+             'country'  => 'TEXT',
+             'drags' => 'INTEGER'
+            },
+            
+            # meta info about table artist
+            meta => {
+                default => [
+                    'country' => 'Europe',
+                    'drags' => 0
+                ],
+                not_null => [
+                   'name'
+                ],
+                pk => ['artist_id'],
+                unique => ['name'],
+                index => [
+                   ['name'],
+                   ['name','country']
+                ]
+            }
+        },
+
+        # another table
+        'albums' => {
+            fields => {
+             'album_id' => 'INTEGER',
+             'album_name' => 'TEXT',
+             'artist_id' => 'INTEGER',
+             'photo' => 'BLOB',
+             'style'  => 'TEXT'
+            },
+            
+            meta => {
+                not_null => [
+                   'album_name'
+                ],
+                pk => ['album_id'],
+                unique => ['album_name'],
+                index => [
+                   ['style'],
+                ]            
+            }
+        },
+        
+        # and another table
+        'dvd' => {
+            fields => {
+             'album_id' => 'INTEGER',
+             'artist_id' => 'INTEGER',
+             'dvd_name' => 'TEXT',         
+            },
+            
+            meta => {
+                not_null => [
+                   'dvd_name'
+                ],
+                unique => ['dvd_name'],
+                index => [
+                   ['dvd_name'],
+                   ['album_id','artist_id']
+                ]            
+            }       
+        }
+           
+    );
+    
+    $dbh->create_trigger(
+        'artist' => {
+                'AFTER' => {
+                    'DELETE' => [
+                        'DELETE FROM dvd WHERE artist_id = OLD.artist_id',
+                        'DELETE FROM albums WHERE artist_id = OLD.artist_id'
+                    ],
+                }
+                
+        },
+        'albums' => {
+                'AFTER' => {
+                    'DELETE' => ['DELETE FROM dvd WHERE album_id = OLD.album_id'],
+                }
+        }       
+    );
+    
+    $dbh->db->do('INSERT INTO ....');
+
+=head1 IN SQL
+
+    CREATE TABLE IF NOT EXISTS artist (
+       'country' TEXT,
+       'photo' BLOB,
+       'artist_id' INTEGER,
+       'name' TEXT NOT NULL UNIQUE,
+       'drags' INTEGER,
+       PRIMARY KEY ('artist_id')
+    );
+    CREATE INDEX _0x2ff7833b3b8d4334bc14bb74ac3769fc ON artist('name');
+    CREATE INDEX _0x3d77f29481f34489a10b61be3da3602b ON artist('name','country');
+    
+    CREATE TABLE IF NOT EXISTS albums (
+       'album_name' TEXT NOT NULL UNIQUE,
+       'album_id' INTEGER,
+       'photo' BLOB,
+       'artist_id' INTEGER,
+       'style' TEXT,
+       PRIMARY KEY ('album_id')
+    );
+    CREATE INDEX _0xf1aa03bc417f467586b88eb676b125fc ON albums('style');
+    
+    CREATE TABLE IF NOT EXISTS dvd (
+       'album_id' INTEGER,
+       'artist_id' INTEGER,
+       'dvd_name' TEXT NOT NULL UNIQUE
+    );
+    CREATE INDEX _0xd109df2d70fb4fe88332257e0c327446 ON dvd('dvd_name');
+    CREATE INDEX _0xb324a617fe6b466685d3a9a9f0d4addc ON dvd('album_id','artist_id');
+    
+    DROP TRIGGER IF EXISTS trigger_artist_after_delete_5a7d596032b6cbc214cf64c48eddfad9;
+    CREATE TRIGGER IF NOT EXISTS trigger_artist_after_delete_5a7d596032b6cbc214cf64c48eddfad9 
+       AFTER DELETE ON artist FOR EACH ROW 
+       BEGIN 
+           DELETE FROM dvd WHERE artist_id = OLD.artist_id;
+           DELETE FROM albums WHERE artist_id = OLD.artist_id; 
+       END;
+       
+    DROP TRIGGER IF EXISTS trigger_albums_after_delete_911a284c6b402e9e87a67669a128d6cd;
+    CREATE TRIGGER IF NOT EXISTS trigger_albums_after_delete_911a284c6b402e9e87a67669a128d6cd 
+       AFTER DELETE ON albums FOR EACH ROW 
+       BEGIN 
+           DELETE FROM dvd WHERE album_id = OLD.album_id; 
+       END;
+
+=head1 DESCRIPTION
+
+This is simple wrapper, for easy create database structure in SQLite.
+Faster DBI is only DBI ;) therefore you can access to DBI::db over "db" method.
+ 
+Now, create table, index, trigger in SQLite is very simple.
+
+=head2 Package METHODS
+
+=head3 connect($abs_path)
+
+Return CCCP::SQLiteWrap object.
+
+=head2 Object METHODS
+
+=head3 db
+
+Access to DBI::db object.
+
+=head3 check
+
+This is very important method. If server is down, while some process write in your SQLite base, after restart, you can get
+error like "database disk image is malformed".
+This method re-dump (over sqlite3) your database if needed.
+
+=head3 close
+
+Close connect to base.
+
+=head3 create_table(table1 => $param1, ..., tableN => $paramN)
+
+Create table. 
+For sqlite version version 3.6.19+ you can add foreign key:
+
+    $dbh->create_table(
+        
+        ....
+                
+        'albums' => {
+            fields => {
+             'album_id' => 'INTEGER',
+             'album_name' => 'TEXT',
+             'artist_id' => 'INTEGER',
+             'photo' => 'BLOB',
+             'style'  => 'TEXT'
+            },
+            
+            meta => {
+                not_null => [
+                   'album_name'
+                ],
+                pk => ['album_id'],
+                unique => ['album_name'],
+                index => [
+                   ['style'],
+                ],
+                fk => [
+                   'artist_id' => {
+                       table => 'artist',
+                       field => 'artist_id',
+                       on_update => 'CASCADE',
+                       on_delete => 'SET DEFAULT' 
+                   },
+                ]            
+            }
+        },
+        
+        ....
+           
+    );
+
+=head3 create_trigger(table1 => $param1, ..., tableN => $paramN)
+
+    $dbh->create_trigger(
+        'table_name' => {
+                'AFTER' => {
+                    'DELETE' => [$query1,...,$queryN],
+                    'INSERT' => [...],
+                    'UPDATE' => [...]
+                },
+                'BEFORE' => {
+                    ...
+                }
+        },
+        
+        ....       
+    );
+
+=head3 index_exists('table_name' => ['field1',...,'fieldN'])
+
+If index exist return name or 0.
+
+=head3 table_exists('table_name')
+
+Bool
+
+=head3 create_index('table_name' => [field1,...,fieldN], ...)
+
+Create index for table
+
+=head3 redump
+
+Re-init database over dump (which make over sqlite3) 
+
+=head3 do_transaction(@query)
+
+Like method "do" from DBI over transaction 
+
+=head3 path
+
+Return path to your database
+
+=head2 PACKAGE VARIABLES
+
+=head3 $CCCP::SQLiteWrap::OnlyPrint
+
+Default is false.
+If true, methods "create_table", "create_trigger", "create_index" return raw sql in stdout and nothing do in base.
+
+=head1 SEE ALSO
+
+=over 4
+
+=item *
+
+C<DBI>
+
+=item *
+
+http://www.sqlite.org
+
+=back
+
+=head1 AUTHOR
+
+mr.Rico <catamoose at yandex.ru>
+
+=cut
