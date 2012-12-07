@@ -223,34 +223,29 @@ sub redump {
     return $self->connect();
 }
 
-# $self->create_index('tablename' => [asfd,asfds,sdf], 'safasf' => [asfdsf,asfd])
-sub create_index {
+# $self->add_index('tablename' => [asfd,asfds,sdf], 'safasf' => [asfdsf,asfd])
+sub add_index {
     my $self = shift;
-    return unless (@_ or scalar @_ % 2 == 0);
+    my %indexes = @_;
     
     my $exisis_table = $self->show_tables;
     my $ret = 0;
     
-    # geting param
-    my $new_index = {};    
-    while (my ($t_name,$ind_array) = splice(@_,0,2)) {
-        next if (not $t_name or not exists $exisis_table->{$t_name} or not $ind_array); 
-        push @{$new_index->{$t_name}}, $ind_array;
-    };
-    
     # check exists index
-    foreach my $table (keys %$new_index) {
+    while (my ($table, $ind_array) = each %indexes) {
+        next if (not $table or not exists $exisis_table->{$table} or not $ind_array);
         my @index = ();
         my $exists_index = {};
         my $index_name = $self->db->selectall_arrayref('PRAGMA index_list('.$self->db->quote($table).')');
         next unless $index_name;
-        map {
+        for (@$index_name) {
             my $i_name = $_->[1];
             my $index_fields = $self->db->selectrow_arrayref('PRAGMA index_info('.$self->db->quote($i_name).')');
             $exists_index->{md5_hex(join(',',sort {$a cmp $b} @$index_fields))}++ if $index_fields;         
-        } @$index_name;
+        }
+
         # create new index sql
-        foreach my $new_index_fields (@{$new_index->{$table}}) {
+        foreach my $new_index_fields (@$ind_array) {
             next if (not $new_index_fields or ref $new_index_fields ne 'ARRAY');
             next if $exists_index->{md5_hex(join(',',sort {$a cmp $b} @$new_index_fields))}++;
             my $unic_name = sprintf('_%s',Data::UUID->new()->create_hex());
@@ -265,7 +260,7 @@ sub create_index {
         
         # create new index in base
         if ($CCCP::SQLiteWrap::OnlyPrint) {
-            print join("\n",@index);
+            print join("\n", @index);
             print "\n------------------------------\n";
         } else {
             $self->do_transaction(@index);
@@ -275,33 +270,30 @@ sub create_index {
     return $ret;
 }
 
-# check table on exists (bool)
 sub table_exists {
     my ($self,$table) = @_;
-    return unless $table;
-    
-    return scalar(grep {/^\Q$table\E$/i} map {$_=~s/"//g; $_;} $self->db->tables) ? 1 : 0; 
+    return 0 unless $table;
+    return (grep { /^\Q$table\E$/i } map { s/"//g; $_ } $self->db->tables) ? 1 : 0; 
 }
 
 # $self->index_exists('name' => ['field1','field2']);
-# return name index if exists for whis fields
+# it'll return name of index if this one exists
 sub index_exists {
-    my ($self,$table,$ind_fields) = @_;
-    
-    return unless ($table and $ind_fields and ref $ind_fields eq 'ARRAY');  
-    return unless $self->table_exists($table);   
-        
+    my ($self,$table,$ind_fields) = @_;    
+    return unless ($table and $ind_fields and ref $ind_fields eq 'ARRAY' and $self->table_exists($table));  
+
     my $index_name = $self->db->selectall_arrayref('PRAGMA index_list('.$self->db->quote($table).')');
     return unless $index_name;
+    
     my $exists_index = {};
-    map {
+    for (@$index_name) {
         my $i_name = $_->[1];
         my $index_fields = $self->db->selectall_arrayref('PRAGMA index_info('.$self->db->quote($i_name).')');
         if ($index_fields) {
             $index_fields = [map {$_->[2]} @$index_fields];
             $exists_index->{md5_hex(join(',',sort {$a cmp $b} @$index_fields))} = $i_name;         
         };
-    } @$index_name; 
+    } 
     
     my $ind_fields_md5 = md5_hex(join(',',sort {$a cmp $b} @$ind_fields));
     
@@ -310,38 +302,35 @@ sub index_exists {
 
 sub create_trigger {
     my $self = shift;
-    return unless (@_ or scalar @_ % 2 == 0);
+    my %triggers = @_;
     
     my @transaction_query = ();
     
     my $exisis_table = $self->show_tables;
-    # cycle for table
-    while (my ($t_name,$param) = splice(@_,0,2)) {  
-       next if (not $t_name or not exists $exisis_table->{$t_name} or not $param or ref $param ne 'HASH' or not keys %$param);
-           # cycle for event listener
-           while (my ($t_event_1,$event_param) = each %$param) {
-                next if (not $t_event_1 or not $event_param or ref $event_param ne 'HASH' or not keys %$event_param);
-                # last cycle
-                while (my ($t_event_2,$sql) = each %$event_param) {
-                    next unless ($t_event_2 and $sql and ref $sql eq 'ARRAY' and scalar @$sql);
-                    $sql = [map {s/;\s*$//s; $_} @$sql];
-                    my $tr_name = join('_',map {lc($_)} ('trigger',$t_name,$t_event_1,$t_event_2,md5_hex(lc(join('',@$sql)))));
-                    # delete trigger
-                    push @transaction_query,sprintf(
-                        $tr_create_pattern->[0],
-                        $tr_name
-                    );
-                    # create trigger
-                    push @transaction_query,sprintf(
-                        $tr_create_pattern->[1],                                
-                        $tr_name,
-                        uc($t_event_1),
-                        uc($t_event_2),
-                        $t_name,
-                        join(';',@$sql)
-                    );
-                };
-           };
+    while (my ($t_name, $param) = each %triggers) {  
+       next if (not $t_name or not exists $exisis_table->{$t_name} or ref $param ne 'HASH' or not keys %$param);
+       while (my ($t_event_1, $event_param) = each %$param) {
+            next if (not $t_event_1 or ref $event_param ne 'HASH' or not keys %$event_param);
+            while (my ($t_event_2, $sql) = each %$event_param) {
+                next unless ($t_event_2 and ref $sql eq 'ARRAY' and @$sql);
+                $sql = [map {s/;\s*$//s; $_} @$sql];
+                my $tr_name = join('_', map {lc $_} ('trigger', $t_name, $t_event_1, $t_event_2, md5_hex(lc(join('',@$sql)))));
+                # delete trigger
+                push @transaction_query, sprintf(
+                    $tr_create_pattern->[0],
+                    $tr_name
+                );
+                # create trigger
+                push @transaction_query, sprintf(
+                    $tr_create_pattern->[1],                                
+                    $tr_name,
+                    uc($t_event_1),
+                    uc($t_event_2),
+                    $t_name,
+                    join(';',@$sql)
+                );
+            };
+       };
     };
     
     # create transaction in base
@@ -350,7 +339,8 @@ sub create_trigger {
             print "\n------------------------------\n";
     } else {
             $self->do_transaction(@transaction_query);
-    };    
+    };
+    return;   
 }
 
 

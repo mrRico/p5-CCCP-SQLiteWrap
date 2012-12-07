@@ -248,9 +248,9 @@ If index exist return name or 0.
 
 Bool
 
-=head3 create_index('table_name' => [field1,...,fieldN], ...)
+=head3 add_index('table_name' => [field1,...,fieldN], ...)
 
-Create index for table
+Add index for a table
 
 =head3 redump
 
