@@ -1,149 +1,137 @@
 package CCCP::SQLiteWrap;
-
 use strict;
+use warnings;
 
-our $VERSION = '0.01';
+our $VERSION = '0.02';
 
+use Carp;
 use DBI;
 use File::Temp;
 use File::Copy;
 use Data::UUID;
-use Digest::MD5 qw(md5_hex);    
+use Digest::MD5 qw(md5_hex);
     
     $CCCP::SQLiteWrap::OnlyPrint = 0;
 
-use warnings;
-    
     my $t_create_pattern = 'CREATE TABLE IF NOT EXISTS %s (%s)';
     my $i_create_pattern = 'CREATE INDEX %s ON %s(%s)';
     my $tr_create_pattern = ['DROP TRIGGER IF EXISTS %s','CREATE TRIGGER IF NOT EXISTS %s %s %s ON %s FOR EACH ROW BEGIN %s; END;'];
 
-# one argument - abs path to sqolite base
 sub connect {
-    my ($class,$path) = @_;    
-    
-    if (ref $class) {
-        # reconnect
-        $class->{db} = DBI->connect('dbi:SQLite:dbname='.$class->path, '', '',{RaiseError => 1, InactiveDestroy => 1});
-    } else {
-        # init new handler
-        my $obj = bless( 
-            {
-                db => DBI->connect('dbi:SQLite:dbname='.$path, '', '',{RaiseError => 1, InactiveDestroy => 1}),
-                path => $path  
-            },
-            $class
-        );
-        
-        # check connect error
-        if ($DBI::errstr) {
-            die $DBI::errstr;
-        };
-        
-        return $obj;
-    }
+    my ($class, $path, $redump) = @_;
+    my $self = ref $class ? $class : bless({ db => undef, path => $path, need_redump => $redump }, $class);
+    $self->{db} = DBI->connect('dbi:SQLite:dbname='.$class->path, '', '',{RaiseError => 1, InactiveDestroy => 1});
+    croak $DBI::errstr if $DBI::errstr;
+    $self->check;
+    return $self;
 }
 
+sub db     {$_[0]->{db}}
+sub path   {$_[0]->{path}}
+sub need_redump {$_[0]->{need_redump}}
+
 sub check {
-    my ($obj) = @_;    
-        
-    # check live connection
-    unless ($obj->db->ping()) {
-        return "Can't ping SQLite base from ".$obj->path."\n";
+    my $self = shift;
+
+    unless ($self->db->ping()) {
+        croak "Can't ping SQLite base by path ".$self->path;
     };
     
-    # check database structure
     my $need_rebackup = 0;
-    my @table = $obj->show_tables;
-    foreach my $table (@table) {
+    my @table = $self->show_tables;
+    for my $table (@table) {
         next unless $table;
-        eval{$obj->db->selectall_arrayref("SELECT * FROM $table LIMIT 1")};
-        if ($DBI::errstr) {
+        eval{
+            $self->db->selectall_arrayref("SELECT * FROM $table LIMIT 1")
+        };
+        if ($@ or $DBI::errstr) {
             $need_rebackup++;
             last;
         };
     };
     if ($need_rebackup) {
-        return "SQLite base from ".$obj->path." return error like 'database disk image is malformed' and goto re-dump";
-        return "Bug in re-dump SQLite" unless $obj->redump();       
+        if ($self->need_redump) {
+	        carp "SQLite base ".$self->path." was return error like 'database disk image is malformed' and need redump";
+            unless ($self->redump) {
+	            croak "Redump failed";
+            } else {
+                return 1;
+            }
+        } else {
+            croak "SQLite base ".$self->path." was return error like 'database disk image is malformed' and need redump";
+        }
     };
     
-    return;    
+    return 1;    
 }
 
-sub db {$_[0]->{'db'}}
-sub path {$_[0]->{'path'}}
-
-# return [{'field1'=>'some_value1',...},{'field1'=>'some_value2',...}]
 sub select2arhash {
-    my ($obj,$query,@param) = @_;
-    my $sth = $obj->db->prepare($query);
-    $sth->execute(@param);
+    my $self = shift;
+    my $query = shift;
+    my $sth = $self->db->prepare($query);
+    $sth->execute(@_);
     return $sth->fetchall_arrayref({});
 }
 
 sub create_table {
-    my $obj = shift;
-    return unless (@_ or scalar @_ % 2 == 0);
+    my $self = shift;
+    unless (@_ % 2 == 0) {
+        carp "Incorrect call create_table";
+        return;
+    }
+    my %desc = @_;
     
-    my $exisis_table = $obj->show_tables;
+    my $exisis_table = $self->show_tables;
+    my $can_fk = $self->db->selectrow_arrayref('PRAGMA foreign_keys');
+    
     my @new_table = ();
     my @create_table = ();
-    my $can_fk = $obj->db->selectrow_arrayref('PRAGMA foreign_keys');
-    while (my ($name,$param) = splice(@_,0,2)) {
-        next if (not $name or ref $name or not $param or ref $param ne 'HASH' or not exists $param->{fields}); 
-        $name = lc($name);
-        next if $exisis_table->{$name}++;
+    
+    while (my ($name, $param) = each %desc) {
+        next if (
+            not $name
+            or $exisis_table->{$name}++ 
+            or ref $param ne 'HASH' 
+            or not exists $param->{fields}
+        ); 
         
         my $desc = ''; my @index = ();
         if (exists $param->{meta}) {
-            # set default value         
-            if (exists $param->{meta}->{default} and scalar @{$param->{meta}->{default}} % 2) {
-                while (my ($fild,$defval) = splice(@{$param->{meta}->{default}},0,2)) {
-                    if (exists $param->{fields}->{$fild}) {                       
-                       $param->{fields}->{$fild} .= ' DEFAULT '.$obj->db->quote($defval);
-                    };
-                }
-            };
+            
+            # set default value
+            my %default = %{ $param->{meta}->{default} || {} }; 
+            while (my ($field, $defval) = each %default) {
+                $param->{fields}->{$field} .= ' DEFAULT '.$self->db->quote($defval) if exists $param->{fields}->{$field};
+            }
             
             # set not null
-            if (exists $param->{meta}->{not_null}) {
-                map {
-                    if (exists $param->{fields}->{$_}) {                       
-                       $param->{fields}->{$_} .= ' NOT NULL';
-                    };
-                } @{$param->{meta}->{not_null}}; 
-            };
+            for ( @{$param->{meta}->{not_null} || []} ) {
+                $param->{fields}->{$_} .= ' NOT NULL' if exists $param->{fields}->{$_};
+            }
             
             # set unique
-            if (exists $param->{meta}->{unique}) {
-                map {
-                    if (exists $param->{fields}->{$_}) {                       
-                       $param->{fields}->{$_} .= ' UNIQUE';
-                    };
-                } @{$param->{meta}->{unique}}; 
-            };
+            for ( @{$param->{meta}->{unique} || []} ) {
+                $param->{fields}->{$_} .= ' UNIQUE' if exists $param->{fields}->{$_};
+            }
 
             # set primary key
             if (exists $param->{meta}->{pk}) {
-                $param->{fields}->{'PRIMARY KEY'} = "(".join(',',map {$obj->db->quote($_)} @{$param->{meta}->{pk}}).")";
-            };          
+                $param->{fields}->{'PRIMARY KEY'} = "(".join(', ',map {$self->db->quote($_)} @{$param->{meta}->{pk}}).")";
+            };
             
             # set fk
             if ($can_fk and exists $param->{meta}->{fk}) {
                 unless ($can_fk->[0]) {
-                    $obj->db->do('PRAGMA foreign_keys = ON');
+                    $self->db->do('PRAGMA foreign_keys = ON');
                     $can_fk->[0] = 1;
                 };
-                my @fk = @{$param->{meta}->{fk}}; 
-                if (@fk and scalar @fk % 2 == 0 ) {
-                    while (my ($fk_field,$fk_param) = splice(@fk,0,2)) {
-                        # REFERENCES artist(artistid) ON DELETE SET DEFAULT
-                        next if (not $fk_field or ref $fk_field or ref $fk_param ne 'HASH' or not exists $param->{fields}->{$fk_field});
-                        $param->{fields}->{$fk_field} .= sprintf(' REFERENCES %s(%s)',$fk_param->{table},$fk_param->{field});
-                        $param->{fields}->{$fk_field} .= ' ON UPDATE '.$fk_param->{on_update} if exists $fk_param->{on_update};
-                        $param->{fields}->{$fk_field} .= ' ON DELETE '.$fk_param->{on_delete} if exists $fk_param->{on_delete};
-                    };
+                my %fk = %{$param->{meta}->{fk}};
+                while (my ($fk_field,$fk_param) = each %fk) {
+                    # REFERENCES artist(artistid) ON DELETE SET DEFAULT
+                    next if (not $fk_field or ref $fk_field or ref $fk_param ne 'HASH' or not exists $param->{fields}->{$fk_field});
+                    $param->{fields}->{$fk_field} .= sprintf(' REFERENCES %s(%s)',$fk_param->{table},$fk_param->{field});
+                    $param->{fields}->{$fk_field} .= ' ON UPDATE '.$fk_param->{on_update} if exists $fk_param->{on_update};
+                    $param->{fields}->{$fk_field} .= ' ON DELETE '.$fk_param->{on_delete} if exists $fk_param->{on_delete};
                 };
             };
             
@@ -151,17 +139,17 @@ sub create_table {
             if (exists $param->{meta}->{index}) {
                 my $index = {};
                 @index = grep {$_} map {                    
-                    my $ind_md5 = md5_hex(join(',',sort {$a cmp $b} @{$_}));
+                    my $ind_md5 = md5_hex(join ',',sort {$a cmp $b} @$_);
                     $index->{$ind_md5}++ ? 
                         undef :
                         sprintf(
                            $i_create_pattern,
-                           sprintf('_%s',Data::UUID->new()->create_hex()),
+                           sprintf('_%s', Data::UUID->new()->create_hex()),
                            $name,
-                           join(',',map {$obj->db->quote($_)} @{$_})
+                           join(',', map {$self->db->quote($_)} @$_)
                         );
                 } @{$param->{meta}->{index}};                
-            };          
+            };
             
         };
         
@@ -172,75 +160,75 @@ sub create_table {
                 grep {$_}
                 map {
                     exists $param->{fields}->{$_} ?
-                    join(' ',$_ eq 'PRIMARY KEY' ? $_ : $obj->db->quote($_),$param->{fields}->{$_}) :
+                    join(' ',$_ eq 'PRIMARY KEY' ? $_ : $self->db->quote($_),$param->{fields}->{$_}) :
                     undef
-                } ((grep {!/^PRIMARY KEY$/} keys %{$param->{fields}}), 'PRIMARY KEY')
+                } ((grep {! /^PRIMARY KEY$/ } keys %{$param->{fields}}), 'PRIMARY KEY')
             )
         );
         
         if ($CCCP::SQLiteWrap::OnlyPrint) {
-            print join("\n",$create_table,@index);
+            print join("\n", $create_table, @index);
             print "\n------------------------------\n";
         } else {
-            $obj->do_transaction($create_table,@index)
+            $self->do_transaction($create_table,@index)
         };
-        push @new_table,$name;
+        push @new_table, $name;
     }
     
-    return wantarray() ? @new_table : scalar @new_table;
+    return wantarray ? @new_table : scalar @new_table;
 }
 
-# do over transaction
 sub do_transaction {
-    my ($obj, @query) = @_;
+    my $self = shift;
+    my @query = @_;
     return unless @query;     
-    $obj->db->begin_work or die $obj->db->errstr;
-    map {$obj->db->do($_) if $_} @query;
-    $obj->db->commit;
+    $self->db->begin_work or croak $self->db->errstr;
+    $self->db->do($_) for @query;
+    $self->db->commit;
     return;
-};
+}
 
 sub show_tables {
-    if (wantarray() ){
-        return grep {$_!~/^sqlite_/} map {$_=~s/"//g; $_;} $_[0]->db->tables;
+    my $self = shift;
+    
+    my @tables = grep { ! /^sqlite_/ } map { s/"//g; $_ } $self->db->tables;
+    
+    if (wantarray) {
+        return @tables;
     } else {
-        my $tab_hash = {};
-        map {$tab_hash->{$_}++} grep {$_!~/^sqlite_/} map {$_=~s/"//g; $_;} $_[0]->db->tables;
-        return $tab_hash;
-    };
+	    my %ret = ();
+        @ret{@tables} = (1) x @tables;
+        return \%ret;
+    }
 }
 
 sub close {
-    my ($obj) = @_;
-    $obj->db->disconnect;    
+    my $self = shift;
+    $self->db->disconnect;
 }
 
-# re-dump need for
-# fix error like "database disk image is malformed"
-# shutdown server (or kill process) while go insert itnto sqlite-base
 sub redump {
-    my ($obj) = @_;
-    $obj->close();
-    if (-e $obj->path and -s _) {
-        my $tmp_file = File::Temp->new()->filename;
-        my $dump_command = sprintf('sqlite3 %s ".dump" | sqlite3  %s',$obj->path,$tmp_file);
-        system($dump_command);
-        move($tmp_file,$obj->path);        
+    my $self = shift;
+    $self->close();
+    if (-e $self->path and -s _) {
+        my $tmp_file = File::Temp->new->filename;
+        my $dump_command = sprintf 'sqlite3 %s ".dump" | sqlite3  %s', $self->path, $tmp_file;
+        system $dump_command;
+        move($tmp_file, $self->path);        
     } else {
-        unlink $obj->path;
-        my $create_command = sprintf('sqlite3 %s "select 1"',$obj->path);
-        system($create_command);
+        unlink $self->path;
+        my $create_command = sprintf 'sqlite3 %s "select 1"', $self->path;
+        system $create_command;
     };
-    $obj->connect();        
-    return -e $obj->path ? 1 : 0;
+    return $self->connect();
 }
 
-# $obj->create_index('tablename' => [asfd,asfds,sdf], 'safasf' => [asfdsf,asfd])
+# $self->create_index('tablename' => [asfd,asfds,sdf], 'safasf' => [asfdsf,asfd])
 sub create_index {
-    my $obj = shift;
+    my $self = shift;
     return unless (@_ or scalar @_ % 2 == 0);
     
-    my $exisis_table = $obj->show_tables;
+    my $exisis_table = $self->show_tables;
     my $ret = 0;
     
     # geting param
@@ -254,11 +242,11 @@ sub create_index {
     foreach my $table (keys %$new_index) {
         my @index = ();
         my $exists_index = {};
-        my $index_name = $obj->db->selectall_arrayref('PRAGMA index_list('.$obj->db->quote($table).')');
+        my $index_name = $self->db->selectall_arrayref('PRAGMA index_list('.$self->db->quote($table).')');
         next unless $index_name;
         map {
             my $i_name = $_->[1];
-            my $index_fields = $obj->db->selectrow_arrayref('PRAGMA index_info('.$obj->db->quote($i_name).')');
+            my $index_fields = $self->db->selectrow_arrayref('PRAGMA index_info('.$self->db->quote($i_name).')');
             $exists_index->{md5_hex(join(',',sort {$a cmp $b} @$index_fields))}++ if $index_fields;         
         } @$index_name;
         # create new index sql
@@ -270,7 +258,7 @@ sub create_index {
                             $i_create_pattern,
                             $unic_name,
                             $table,
-                            join(',',map {$obj->db->quote($_)} @$new_index_fields)
+                            join(',',map {$self->db->quote($_)} @$new_index_fields)
             );
             $ret++;
         };
@@ -280,7 +268,7 @@ sub create_index {
             print join("\n",@index);
             print "\n------------------------------\n";
         } else {
-            $obj->do_transaction(@index);
+            $self->do_transaction(@index);
         };      
     };
     
@@ -289,26 +277,26 @@ sub create_index {
 
 # check table on exists (bool)
 sub table_exists {
-    my ($obj,$table) = @_;
+    my ($self,$table) = @_;
     return unless $table;
     
-    return scalar(grep {/^\Q$table\E$/i} map {$_=~s/"//g; $_;} $obj->db->tables) ? 1 : 0; 
+    return scalar(grep {/^\Q$table\E$/i} map {$_=~s/"//g; $_;} $self->db->tables) ? 1 : 0; 
 }
 
-# $obj->index_exists('name' => ['field1','field2']);
+# $self->index_exists('name' => ['field1','field2']);
 # return name index if exists for whis fields
 sub index_exists {
-    my ($obj,$table,$ind_fields) = @_;
+    my ($self,$table,$ind_fields) = @_;
     
     return unless ($table and $ind_fields and ref $ind_fields eq 'ARRAY');  
-    return unless $obj->table_exists($table);   
+    return unless $self->table_exists($table);   
         
-    my $index_name = $obj->db->selectall_arrayref('PRAGMA index_list('.$obj->db->quote($table).')');
+    my $index_name = $self->db->selectall_arrayref('PRAGMA index_list('.$self->db->quote($table).')');
     return unless $index_name;
     my $exists_index = {};
     map {
         my $i_name = $_->[1];
-        my $index_fields = $obj->db->selectall_arrayref('PRAGMA index_info('.$obj->db->quote($i_name).')');
+        my $index_fields = $self->db->selectall_arrayref('PRAGMA index_info('.$self->db->quote($i_name).')');
         if ($index_fields) {
             $index_fields = [map {$_->[2]} @$index_fields];
             $exists_index->{md5_hex(join(',',sort {$a cmp $b} @$index_fields))} = $i_name;         
@@ -321,12 +309,12 @@ sub index_exists {
 }
 
 sub create_trigger {
-    my $obj = shift;
+    my $self = shift;
     return unless (@_ or scalar @_ % 2 == 0);
     
     my @transaction_query = ();
     
-    my $exisis_table = $obj->show_tables;
+    my $exisis_table = $self->show_tables;
     # cycle for table
     while (my ($t_name,$param) = splice(@_,0,2)) {  
        next if (not $t_name or not exists $exisis_table->{$t_name} or not $param or ref $param ne 'HASH' or not keys %$param);
@@ -361,7 +349,7 @@ sub create_trigger {
             print join("\n",@transaction_query);
             print "\n------------------------------\n";
     } else {
-            $obj->do_transaction(@transaction_query);
+            $self->do_transaction(@transaction_query);
     };    
 }
 

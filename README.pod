@@ -27,10 +27,10 @@ B<CCCP::SQLiteWrap> - wrapper on SQLite (only for nix)
             
             # meta info about table artist
             meta => {
-                default => [
+                default => {
                     'country' => 'Europe',
                     'drags' => 0
-                ],
+                },
                 not_null => [
                    'name'
                 ],
