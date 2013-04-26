@@ -6,3 +6,4 @@ Revision history for Perl extension CCCP::SQLiteWrap.
 
 0.02  Fri Dec  7 12:15:53 2012
     - some sugar and debug
+    - fix connect method

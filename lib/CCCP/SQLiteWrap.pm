@@ -20,7 +20,7 @@ use Digest::MD5 qw(md5_hex);
 sub connect {
     my ($class, $path, $redump) = @_;
     my $self = ref $class ? $class : bless({ db => undef, path => $path, need_redump => $redump }, $class);
-    $self->{db} = DBI->connect('dbi:SQLite:dbname='.$class->path, '', '',{RaiseError => 1, InactiveDestroy => 1});
+    $self->{db} = DBI->connect('dbi:SQLite:dbname='.$self->path, '', '',{RaiseError => 1, InactiveDestroy => 1});
     croak $DBI::errstr if $DBI::errstr;
     $self->check;
     return $self;
