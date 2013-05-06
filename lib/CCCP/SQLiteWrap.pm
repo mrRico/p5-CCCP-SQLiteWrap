@@ -2,11 +2,10 @@ package CCCP::SQLiteWrap;
 use strict;
 use warnings;
 
-our $VERSION = '0.02';
+our $VERSION = '0.021';
 
 use Carp;
 use DBI;
-use File::Temp;
 use File::Copy;
 use Data::UUID;
 use Digest::MD5 qw(md5_hex);
@@ -211,7 +210,13 @@ sub redump {
     my $self = shift;
     $self->close();
     if (-e $self->path and -s _) {
-        my $tmp_file = File::Temp->new->filename;
+        my $tmp_file = $self->path.'.bak';
+        my $i = 0;
+        while (-e $tmp_file and $i < 3) {
+            $tmp_file .= '.bak';
+            $i++;
+        }
+        die "can't create temp file, $tmp_file already exists" if $i == 3;
         my $dump_command = sprintf 'sqlite3 %s ".dump" | sqlite3  %s', $self->path, $tmp_file;
         system $dump_command;
         move($tmp_file, $self->path);        
